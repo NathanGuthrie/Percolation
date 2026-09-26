@@ -29,6 +29,8 @@ This project speeds up the Monte Carlo percolation simulation from the original 
 | 001 | Original code, demos stripped, seeded | 14.1 s | n/a | 1.0× |
 | 002 | `try/except IndexError` → bounds-checked `if` | 7.9 s | ~1.8× | ~1.8× |
 | 003 | Stop filling as soon as the bottom row is reached | 2.9 s | ~2.7× | ~4.8× |
+| 004 (step 1) | `visited` as one NumPy array reused and cleared with `.fill(False)` | 2.3 s | ~1.2× | ~6.1× |
+| 004 (step 2, current) | `grid` and `visited` as plain Python lists of lists | 0.74 s | ~3.1× vs step 1 | ~19× |
 
 ---
 
@@ -122,3 +124,65 @@ if i > 0   and grid[i-1,j]:   # above
 **Verification:**
 - The full simulation at N = 300 gave an identical `chancePercolates` array to 002 at all 135 values of `p`.
 - Time: 7.9 s → 2.9 s (~2.7× faster than 002, ~4.8× faster than 001).
+
+## 004: `004 percolation with fast grid setup.py`
+
+Version 004 was built in two steps. Step 1 is kept below for reference. Step 2 is the current state of the file.
+
+### Step 1: `visited` as a reused NumPy array (superseded by step 2)
+
+**Change:** replaced the per-grid list comprehension with a single NumPy boolean array that is created once and cleared in place for each new grid.
+
+- **Before (001–003):** for every one of the 675,000 grids in a full run, a new array was built with `np.array([[False for j in range(n)] for j in range(n)])`. That creates a 20-element Python list 20 times (400 Python `False` objects), and NumPy then has to inspect that nested list to work out its shape and type before copying it into an array.
+- **After:** `visited = np.zeros((n,n), dtype=bool)` is created once at module level. Inside the main loop, `visited.fill(False)` resets it in place. This is a single C-level memory write over 400 bytes, with no new array created and no Python lists built.
+- The previous line at module level, `visited = np.array([[False ...]])`, which was rebound in the loop anyway, is now the one real allocation.
+- The plot title is now "Fast visited grid setup".
+
+**Options benchmarked** (time for one 20×20 all-False grid, `timeit`, 200,000 repeats):
+
+| Method | Time per call |
+|---|---|
+| `np.array([[False for j in range(n)] for j in range(n)])` (old) | ~11.9 µs |
+| `np.full((n,n), False)` | ~0.35 µs |
+| `v[:] = False` (reuse existing array) | ~0.15 µs |
+| `np.zeros((n,n), dtype=bool)` (new array each time) | ~0.11 µs |
+| `v.fill(False)` (reuse existing array) | **~0.06 µs** (chosen) |
+
+`np.zeros` would have given nearly all the benefit. Reusing one array with `.fill(False)` is about twice as fast again and avoids creating an array for every grid, so that was chosen.
+
+**Why the saving is modest:** about 12 µs is saved per grid. Over the 40,500 grids of the N = 300 test that's roughly 0.5 s, which is what was measured. Over the 675,000 grids of a full N = 5000 run it's roughly 8 s. Most of the remaining time is now in the recursive fill itself and in `make_grid`.
+
+**Caveat:** because `visited` is now one shared array reused for every grid, it must be cleared before each call to `percolates`. The `visited.fill(False)` line in the main loop must stay directly before it.
+
+**Verification:**
+- The full simulation at N = 300 gave an identical `chancePercolates` array to 003 at all 135 values of `p`.
+- Time: 2.8 s (003, on this run) → 2.3 s (~1.2× faster than 003, ~6.1× faster than 001).
+
+### Step 2: plain Python lists instead of NumPy arrays (current)
+
+**Change:** `grid` and `visited` are now ordinary Python lists of lists, and every cell access uses `[i][j]` instead of `[i,j]`.
+
+- **`make_grid`** still generates the grid with `np.random.choice`, exactly as before, so the random sequence and the grids are unchanged. It now returns `arr.tolist()`, a list of 20 lists of 20 Python `bool`s.
+- **`visited`** is now `[[False]*n for _ in range(n)]`, created once at module level. A second list `falseRow = [False]*n` is also created once.
+- **Resetting `visited`** for each grid: the main loop runs `for row in visited: row[:] = falseRow`, which overwrites each row in place with a copy of `falseRow`. As in step 1, this avoids creating new lists for every grid, and it must stay directly before `percolates(grid)`.
+- **Indexing:** in `reaches_bottom` and `percolates`, all `grid[a,b]` / `visited[a,b]` became `grid[a][b]` / `visited[a][b]`.
+- The plot title is now "Python lists instead of numpy arrays for the fill".
+
+**Why it is faster:** NumPy is fast for operations on whole arrays, which run in C. The recursive fill instead reads and writes **one cell at a time from Python**, thousands of times per grid. For every single-element access, NumPy has to parse the index tuple, check bounds, work out the memory offset and wrap the result in a new NumPy scalar object (`np.bool_`). A Python list lookup just returns a pointer to an object that already exists (`True` or `False`). The truth tests in the `if` checks are also cheaper on Python `bool`s than on `np.bool_`. Across the whole run these savings add up to much more than the one-off cost of `.tolist()`.
+
+**Costs benchmarked** (single 20×20 grid, `timeit`, 200,000 repeats):
+
+| Operation | Time per call |
+|---|---|
+| `a.tolist()` (convert a NumPy grid to lists) | ~1.3 µs |
+| `[[False]*n for _ in range(n)]` (new visited list) | ~0.84 µs |
+| `for r in v: r[:] = F` (clear existing visited list in place, chosen) | ~0.74 µs |
+
+Clearing the lists takes longer than NumPy's `.fill(False)` (~0.06 µs), and `.tolist()` adds ~1.3 µs per grid. Both are small next to the time saved on the tens to hundreds of cell accesses each fill makes.
+
+**Verification:**
+- The full simulation at N = 300 gave an identical `chancePercolates` array to step 1 (NumPy `visited`) at all 135 values of `p`. The grids are still generated by the same `np.random.choice` calls, so the results are exact, not just statistically equal.
+- Time: 2.3 s (step 1) → 0.74 s (~3.1× faster than step 1, ~19× faster than 001).
+
+**Ideas noted for later versions:**
+- **Done in 005:** generating all N grids for each `p` in one call. This was expected to change the random sequence, but it turned out not to (see 005).
