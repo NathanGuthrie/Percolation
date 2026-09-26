@@ -32,6 +32,7 @@ This project speeds up the Monte Carlo percolation simulation from the original 
 | 004 (step 1) | `visited` as one NumPy array reused and cleared with `.fill(False)` | 2.3 s | ~1.2× | ~6.1× |
 | 004 (step 2, current) | `grid` and `visited` as plain Python lists of lists | 0.74 s | ~3.1× vs step 1 | ~19× |
 | 005 | All N grids for each `p` generated in one NumPy call | 0.49 s | ~1.6× | ~29× |
+| 006 | Check before each call; fill marks the grid itself, `visited` removed | 0.32 s | ~1.4× | ~44× |
 
 ---
 
@@ -236,3 +237,42 @@ Over the 135 values of `p`, generation drops from about 5.8 s to about 0.5 s of 
 - A statistical comparison script (z-scores of the difference at each `p`) was prepared in case the results differed. It isn't needed while the grids stay identical, but will be used for any future change that does alter the random sequence.
 
 **Where the time goes now:** grid generation is now small. What remains is mostly the recursive fill in Python (the function calls themselves), the per-grid `.tolist()` and clearing `visited`.
+
+## 006: `006 percolation with check before function call.py`
+
+**Change:** `reaches_bottom` is now only called on cells that are open **and not yet filled**. The separate `visited` grid is removed, and filled cells are marked by setting them to `False` in the grid itself.
+
+**The problem it fixes:** in 005, the fill called `reaches_bottom` on every open neighbour, and the function then checked `visited` and returned `False` straight away if the cell had already been filled. Instrumenting 005 at N = 300 showed:
+- 3,339,327 calls to `reaches_bottom` in total
+- 1,614,692 of them (**48.4%**) returned immediately because the cell was already visited
+
+In Python the function call itself (setting up a frame, passing arguments, returning) is the expensive part, so nearly half the calls were close to pure waste.
+
+**What changed in the code:**
+- **Filling in place:** the first line of `reaches_bottom` is now `grid[i][j] = False`. A filled cell then looks exactly like a closed cell, so no later check will ever enter it again.
+- **One lookup per neighbour:** each neighbour check `grid[a][b]` is now `True` only if the neighbour is open **and** not yet filled. The function is therefore only called when it has real work to do, and the check at the start of the function (`if visited[i][j] == True: return False`) is gone.
+- **`percolates` simplified** to `if grid[0][i] and reaches_bottom(grid, 0, i): return True`. A top cell already filled by an earlier seed is now `False`, so the separate "closed" and "already visited" checks become a single check.
+- **Removed:** the `visited` list of lists, `falseRow`, and the `for row in visited: row[:] = falseRow` clearing loop that ran for every grid.
+- **Why overwriting the grid is safe:** each `grid` is a fresh list made by `gridArray.tolist()` for that one fill and is never used again. The NumPy batch `grids` itself is not modified, only the list copy.
+- The plot title is now "Checking before each call, filling the grid in place".
+- Comments in the code explain all of the above, including why skipping filled cells is safe.
+
+**Why skipping filled cells can't miss a percolation:** when the fill moves from cell A into a neighbour, A's call doesn't end. It waits part-way through its list of neighbours and carries on with the rest when the neighbour's call returns. So when the fill reaches an already-filled cell C by another route, C is either:
+1. **finished:** it has already tried every neighbour and everything reachable through them, and none reached the bottom, so going back in would only repeat work that has already failed; or
+2. **still in progress** (a call waiting further up the chain): it will try its remaining neighbours once control returns to it.
+
+Either way every neighbour of C gets tried. Put another way, the cells reachable from the top form one connected blob, and the fill only needs to visit each cell of that blob once and check its neighbours to find all of it. This isn't new behaviour: every version since 2024 has skipped visited cells. 006 just makes the check before the call instead of just after it.
+
+**Why the results are exactly the same:** the neighbours are tried in the same order (below, right, left, above) and the same cells are filled in the same order. The only difference is that calls which would have returned `False` immediately are never made.
+
+**Verification:**
+- Call count at N = 300 fell from 3,339,327 to **1,724,635**. That is exactly 3,339,327 − 1,614,692, so precisely the wasted calls were removed and nothing else changed.
+- The full simulation at **N = 5000** gave an identical `chancePercolates` array to 005 at all 135 values of `p`. Full-run time: 7.6 s (005) → 5.6 s (006).
+- At N = 300: identical `chancePercolates` again. 0.45 s (005, this run) → 0.32 s (~1.4× faster than 005, ~44× faster than 001).
+
+**Why it's ~1.4× and not ~2×:** half the calls were removed, but the removed calls were the cheapest ones (a single check and return). The remaining calls do the real work (four neighbour checks and further calls), and there are fixed costs per grid too (`.tolist()`, the loop over the top row).
+
+**Ideas noted for later versions:**
+- Replace the recursion with an explicit stack (`while stack:`) to remove Python function-call overhead altogether and the recursion depth limit. It can keep the same fill order, so the results stay exact.
+- Skip grids with a completely closed row using one NumPy check on the whole batch. **Tried in 007: correct, but no worthwhile gain.**
+- Bigger options: fill all N grids at once with NumPy array operations; compile the fill with Numba; or compute each random grid's percolation threshold once and build the whole curve from N grids in total (which would only match earlier versions statistically).
