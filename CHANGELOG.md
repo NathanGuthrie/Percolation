@@ -33,6 +33,7 @@ This project speeds up the Monte Carlo percolation simulation from the original 
 | 004 (step 2, current) | `grid` and `visited` as plain Python lists of lists | 0.74 s | ~3.1× vs step 1 | ~19× |
 | 005 | All N grids for each `p` generated in one NumPy call | 0.49 s | ~1.6× | ~29× |
 | 006 | Check before each call; fill marks the grid itself, `visited` removed | 0.32 s | ~1.4× | ~44× |
+| 007 (failed experiment) | Closed-row / open-column pre-check, naive switch at `p = 0.5` | 0.318 s (006: 0.325 s, same session) | ~1.02× (within noise) | ~44× |
 
 ---
 
@@ -276,3 +277,42 @@ Either way every neighbour of C gets tried. Put another way, the cells reachable
 - Replace the recursion with an explicit stack (`while stack:`) to remove Python function-call overhead altogether and the recursion depth limit. It can keep the same fill order, so the results stay exact.
 - Skip grids with a completely closed row using one NumPy check on the whole batch. **Tried in 007: correct, but no worthwhile gain.**
 - Bigger options: fill all N grids at once with NumPy array operations; compile the fill with Numba; or compute each random grid's percolation threshold once and build the whole curve from N grids in total (which would only match earlier versions statistically).
+
+## 007: `007 percolation with naive check.py` (failed experiment)
+
+**Idea:** some grids can be decided without filling them at all, using one NumPy check on the whole batch:
+- **A completely closed row** means nothing can get past that row, so the grid **cannot** percolate.
+- **A completely open column** means the fill can go straight down it, so the grid **must** percolate.
+
+Both are logical certainties about a single grid, not assumptions about the curve, so they can never give a wrong answer.
+
+**The "first try" design choice:** closed rows seemed likely to be common only at low `p`, and open columns only at high `p`. As a naive first guess, the test switches over **halfway along the `p` range, at `p = 0.5`**:
+- `p < 0.5`: only the closed-row test is run, and those grids add nothing to `numberPercolates`.
+- `p ≥ 0.5`: only the open-column test is run, and those grids are counted as percolating straight away.
+
+The switch point was deliberately **not** tuned using knowledge of the curve (for example, where it actually rises). In keeping with the project's "first try" spirit, it is just the midpoint. Because both tests are certainties, the switch point only affects speed, never the results.
+
+**What changed in the code:**
+- After `grids = make_grids(N,n,p)`, a pre-check block builds a boolean array `decided` of shape `(N,)`:
+  - closed row: `(~grids.any(axis=2)).any(axis=1)`. `grids.any(axis=2)` is `True` for each row with at least one open cell, `~` flips it to "row completely closed", and `.any(axis=1)` asks whether the grid has any such row.
+  - open column: `grids.all(axis=1).any(axis=1)`. `grids.all(axis=1)` is `True` for each column where every cell is open, and `.any(axis=1)` asks whether the grid has any such column. These grids are added to `numberPercolates` with `int(decided.sum())`.
+- `grids = grids[~decided]` keeps only the undecided grids, and the existing loop fills those as before.
+- `numberPercolates/N` is still divided by the full N, because decided grids are counted (or correctly not counted) by the pre-check.
+- The plot title is now "Naive closed row / open column pre-check, switching at p = 0.5".
+- Comments explain both tests, the switch-over and that this is an experiment.
+
+**Results:**
+- **Correct:** the full N = 5000 curve is identical to 006 at all 135 values of `p`, as expected since both tests are certainties.
+- **Grids decided by the pre-check:** 82,570 of 675,000 in a full run (**12.2%**).
+- **Time, full N = 5000, best of 3:** 006 5.53 s, 007 5.42 s (~2% faster).
+- **Time, N = 300, best of 5:** 006 0.325 s, 007 0.318 s (~2% faster). Run-to-run variation within each version was similar in size, so this gain is only just above the noise.
+
+**Why it failed:** 12% of grids skip the fill, but they are exactly the grids the fill already handled almost instantly:
+- **Low `p`, closed row:** almost every top cell is closed, and the few open ones hit a dead end within a cell or two. The fill already cost almost nothing.
+- **High `p`, open column:** since 003 the fill tries "below" first and stops at the bottom row, so a mostly open grid is solved in about 20 calls going nearly straight down.
+- The time is spent on grids in the middle of the curve (roughly `p` = 0.5–0.65), where the fill has to wander. Those grids almost never have a completely closed row or completely open column, so neither test helps where it would matter.
+- The pre-check also has its own small cost (about 1 ms per `p` for the NumPy operations and for building `grids[~decided]`), which cancels part of what it saves.
+
+**Conclusion:** the pre-check is correct and harmless, but the ~2% gain isn't worth the extra code. It is left as a documented failed experiment. 006 remains the best "clean" version. Any further real speed-up would need to target the middle-`p` grids, for example an explicit stack instead of recursion, or a fundamentally different method.
+
+**A related earlier measurement** (while deciding whether to try this, N = 300, best of 3): running the closed-row test on every `p` gave 0.320 s, and running both tests on every `p` gave 0.321 s, against 0.316 s for 006. Run everywhere, the tests were slightly slower. The naive `p = 0.5` switch-over at least avoids running a test where it can never succeed, which is why 007 comes out just ahead of 006 instead of just behind.
