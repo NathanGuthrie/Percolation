@@ -34,6 +34,7 @@ This project speeds up the Monte Carlo percolation simulation from the original 
 | 005 | All N grids for each `p` generated in one NumPy call | 0.49 s | ~1.6× | ~29× |
 | 006 | Check before each call; fill marks the grid itself, `visited` removed | 0.32 s | ~1.4× | ~44× |
 | 007 (failed experiment) | Closed-row / open-column pre-check, naive switch at `p = 0.5` | 0.318 s (006: 0.325 s, same session) | ~1.02× (within noise) | ~44× |
+| 008 | Padded, flattened grid (built on 006): no bounds checks, one lookup per cell | 0.250 s (006: 0.339 s, same session) | ~1.36× vs 006 | ~60× (est.) |
 
 ---
 
@@ -316,3 +317,62 @@ The switch point was deliberately **not** tuned using knowledge of the curve (fo
 **Conclusion:** the pre-check is correct and harmless, but the ~2% gain isn't worth the extra code. It is left as a documented failed experiment. 006 remains the best "clean" version. Any further real speed-up would need to target the middle-`p` grids, for example an explicit stack instead of recursion, or a fundamentally different method.
 
 **A related earlier measurement** (while deciding whether to try this, N = 300, best of 3): running the closed-row test on every `p` gave 0.320 s, and running both tests on every `p` gave 0.321 s, against 0.316 s for 006. Run everywhere, the tests were slightly slower. The naive `p = 0.5` switch-over at least avoids running a test where it can never succeed, which is why 007 comes out just ahead of 006 instead of just behind.
+
+## 008: `008 percolation with padded grid.py`
+
+**Built on 006**, the best clean version, not on 007: 007's pre-check was a failed experiment and is left out.
+
+**Change:** each grid is surrounded by a border of closed cells and flattened into a single Python list, so the fill needs no bounds checks and each cell is a single lookup.
+
+**Flattening:** a 20×20 grid becomes one list, and cell `(i, j)` becomes index `k = i*W + j`. Its neighbours are `k+W` (below), `k+1` (right), `k-1` (left) and `k-W` (above). `grid[k]` is one list lookup, where `grid[i][j]` is two (fetch the row, then the cell).
+
+**Why flattening on its own isn't enough:** in a plain flat 20×20 list the edges stop behaving:
+- **Right edge:** `k+1` from the last cell in a row is the *first cell of the next row*, a silent wrong connection with no error.
+- **Left edge:** `k-1` from the first cell in a row is the last cell of the previous row.
+- **Top edge:** `k-20` goes negative, and Python's negative indexing wraps round to the bottom of the grid (the same wraparound problem the 2024 code guarded against with `if j > 0`).
+- **Bottom edge:** `k+20` runs past the end of the list and raises `IndexError`.
+
+So a flat list without padding would still need checks like `j = k % n; if j < n-1 ...` on every call.
+
+**Padding (the "sentinel" or "ghost cell" trick):** a ring of closed cells is added round every grid, making it `W×W` with `W = n+2 = 22`. Every real cell then has all four neighbours inside the list, and any neighbour off the real grid is a border cell, which is closed. The existing `if grid[m]` check ("open and unfilled") already refuses to enter closed cells, so it refuses the border too. The four bounds checks simply disappear.
+
+```
+# # # # # #      O = open, # = closed
+# O O # O #      the outer ring is the padding
+# # O O O #
+# O # O # #
+# # # # # #
+```
+
+**What changed in the code:**
+- New constants, computed once:
+  - `W = n+2`: width of a padded row.
+  - `bottom = n*W`: index of the first cell of the bottom real row (padded row `n`). The border row below it (row `n+1`) is closed and never entered, so any filled cell with `k >= bottom` is on the real bottom row.
+  - `topRow = range(W+1, W+1+n)`: indices of the real cells in the top row (padded row 1, columns 1 to n).
+- **`reaches_bottom(grid, k)`** now takes one index instead of `(i, j)`. The bottom check is `k >= bottom` instead of `i == n-1`, and each neighbour check is `grid[k±…] and reaches_bottom(grid, k±…)`, with no `i < n-1`, `j < n-1`, `j > 0` or `i > 0`.
+- **`percolates`** loops over `topRow` instead of `range(n)`.
+- **Main loop:** after `make_grids`, a single line pads and flattens the whole batch:
+  `grids = np.pad(grids, ((0,0),(1,1),(1,1))).reshape(N, W*W)`. `np.pad` adds one layer on each side of the two grid dimensions (not the batch dimension) and fills it with `False` by default. `.reshape(N, W*W)` then turns each padded grid into one row of 484 values. Each grid is still converted with `.tolist()` one at a time, now giving a flat list.
+- `make_grids` is unchanged, so the grids (and random numbers) are exactly the same as 001–006.
+- The plot title is now "Padded, flattened grid with no bounds checks".
+
+**How much each part contributes** (prototype on the same 40,500 grids as N = 300, best of 3, all with identical percolation counts):
+
+| Version | Time |
+|---|---|
+| 006 (list of lists, bounds checks) | 0.290 s |
+| Flat list, no padding, bounds checks using `k % n` | 0.273 s (~6% faster) |
+| Flat list with padding, no bounds checks (008) | 0.224 s (~23% faster) |
+
+Most of the gain comes from removing the bounds checks, which padding makes possible. Flattening on its own helps only a little.
+
+**Also tried: explicit stack instead of recursion.** A padded, flattened fill using a `while stack:` loop took 0.292 s, no faster than 006, so it was not used. Since Python 3.11 function calls have become much cheaper (this machine runs Python 3.13), and managing a stack by hand in Python costs about as much as the calls it replaces.
+
+**Verification:**
+- **N = 300, best of 5:** 006 0.339 s, 008 0.250 s (~1.36× faster). Curves identical.
+- **Full N = 5000, best of 3:** 006 5.73 s, 008 4.13 s (~1.39× faster). Curves identical at all 135 values of `p`.
+- The machine ran about 5% slower in this session than in earlier ones (006 measured 0.339 s here against 0.32 s before), so 008 was always timed against 006 in the same session. Against 001 it is roughly 60× faster, estimated by scaling from 006's earlier ~44×.
+
+**Implementation note:** while creating the file, a scripted edit anchored on the text `N = 5000`, which also appears in a comment inside `make_grids`. That made two bad edits, and the file was then rewritten cleanly from scratch. The final file was checked by running it (identical curves above).
+
+**Remaining idea (a judgement call on the project's spirit):** the 135 values of `p` are independent, so they could be split across the machine's 10 CPU cores with `multiprocessing`. With the grids still generated in the same order the results would stay exact, and a 5–8× speed-up might be expected. But it would be the same code on more hardware rather than better code.
