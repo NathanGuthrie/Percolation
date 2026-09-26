@@ -27,6 +27,7 @@ This project speeds up the Monte Carlo percolation simulation from the original 
 | Version | Change | Time | Speed-up vs previous | Speed-up vs 001 |
 |---|---|---|---|---|
 | 001 | Original code, demos stripped, seeded | 14.1 s | n/a | 1.0× |
+| 002 | `try/except IndexError` → bounds-checked `if` | 7.9 s | ~1.8× | ~1.8× |
 
 ---
 
@@ -65,3 +66,35 @@ The algorithm is unchanged: `make_grid`, `compute_fill_from_top`, `compute_fill`
 - Each `try` block covers the recursive call as well as the neighbour lookup, so an `IndexError` raised deeper in the recursion would be silently ignored. Nothing currently raises one, but it could hide bugs.
 - The largest possible recursion depth is `n² = 400`, which is under Python's default limit of 1000. Grids much bigger than 20×20 would hit `RecursionError`.
 - `visited` is a global that the main loop rebinds. This works, but it will get in the way of vectorising or parallelising.
+
+## 002: `002 percolation with try except replaced.py`
+
+**Change:** replaced the four `try/except IndexError` blocks in `compute_fill_from_top` with bounds checks made before indexing.
+
+```python
+if i < n-1 and grid[i+1,j]:   # below
+    compute_fill_from_top(grid, i+1, j)
+if j < n-1 and grid[i,j+1]:   # right
+    compute_fill_from_top(grid, i, j+1)
+if j > 0   and grid[i,j-1]:   # left
+    compute_fill_from_top(grid, i, j-1)
+if i > 0   and grid[i-1,j]:   # above
+    compute_fill_from_top(grid, i-1, j)
+```
+
+**Why it is faster:**
+- Raising and catching an exception in Python is expensive compared with a simple integer comparison. The old code raised an `IndexError` every time the fill touched the bottom or right edge.
+- The old code read `grid[i, j-1]` and `grid[i-1, j]` before checking whether the index was valid. Now `and` stops as soon as the bounds check fails, so the grid is only read for valid neighbours.
+- Setting up a `try` block on every neighbour check also has a small cost, and that is gone too.
+
+**Other details:**
+- The same `if` checks now handle negative-index wraparound on the left and top edges, so the separate `j > 0` / `i > 1` workarounds are gone.
+- The `i > 1` quirk is corrected to `i > 0`. As explained under 001, this doesn't change the output.
+- `== True` comparisons in the neighbour checks were dropped because the grid values are already booleans.
+- Neighbours are still checked in the same order (below, right, left, above).
+- The plot title is now "Simple replacement of try/except with if statements".
+
+**Verification:**
+- The two versions of `compute_fill` gave identical fill patterns on 5,000 random 20×20 grids.
+- The full simulation at N = 300 gave an identical `chancePercolates` array to 001 at all 135 values of `p`.
+- Time: 14.1 s → 7.9 s (~1.8× faster).
