@@ -28,6 +28,7 @@ This project speeds up the Monte Carlo percolation simulation from the original 
 |---|---|---|---|---|
 | 001 | Original code, demos stripped, seeded | 14.1 s | n/a | 1.0× |
 | 002 | `try/except IndexError` → bounds-checked `if` | 7.9 s | ~1.8× | ~1.8× |
+| 003 | Stop filling as soon as the bottom row is reached | 2.9 s | ~2.7× | ~4.8× |
 
 ---
 
@@ -98,3 +99,26 @@ if i > 0   and grid[i-1,j]:   # above
 - The two versions of `compute_fill` gave identical fill patterns on 5,000 random 20×20 grids.
 - The full simulation at N = 300 gave an identical `chancePercolates` array to 001 at all 135 values of `p`.
 - Time: 14.1 s → 7.9 s (~1.8× faster).
+
+## 003: `003 percolation stopping at bottom.py`
+
+**Change:** the fill stops as soon as it reaches the bottom row, instead of filling the whole reachable region and checking the bottom row afterwards. The old `percolates(visited)` function has been removed, and the two fill functions are renamed to say what they now return (see below).
+
+- `compute_fill_from_top` is renamed `reaches_bottom(grid, i, j)` and now returns a boolean:
+  - It returns `False` straight away if the cell was already visited.
+  - Otherwise it marks the cell as filled. If the cell is in the bottom row (`i == n-1`), it returns `True`, because the grid percolates.
+  - Otherwise it tries the neighbours in the same order (below, right, left, above). Each check has the form `bounds and grid[...] and reaches_bottom(...)`, so as soon as a recursive call returns `True`, this call returns `True` without trying the remaining neighbours. The `True` is passed all the way back up the chain of calls.
+  - If no neighbour reaches the bottom, it returns `False`.
+- `compute_fill` is renamed `percolates(grid)` and now returns whether the grid percolates, not `visited`. It still starts a fill from each open, unvisited top cell, but returns `True` as soon as one of them reaches the bottom. It returns `False` if none do.
+- The old `percolates(visited)` function is deleted. The main loop is now `if percolates(grid): numberPercolates += 1`.
+- The plot title is now "Stopping the fill as soon as it reaches the bottom".
+
+**Why it is faster:** for high `p`, almost every grid percolates and most cells are open. Previously the whole connected region (often most of the 400 cells) was flooded before the bottom row was checked. Now the fill tries "below" first, so it usually goes nearly straight down and stops after only about `n` cells. Grids that don't percolate still have to explore everything reachable, so there is less saving at low `p`.
+
+**Side effect:** `visited` now only holds the cells visited before the fill stopped, not the whole filled region. That's fine for the simulation, but `visited` can no longer be used to draw the fully filled grid.
+
+**Minor leftover:** the `i < n-1` check on the "below" neighbour can never be false now, because bottom-row cells return before reaching it. It is harmless and was left in.
+
+**Verification:**
+- The full simulation at N = 300 gave an identical `chancePercolates` array to 002 at all 135 values of `p`.
+- Time: 7.9 s → 2.9 s (~2.7× faster than 002, ~4.8× faster than 001).
