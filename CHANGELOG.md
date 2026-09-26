@@ -31,6 +31,7 @@ This project speeds up the Monte Carlo percolation simulation from the original 
 | 003 | Stop filling as soon as the bottom row is reached | 2.9 s | ~2.7× | ~4.8× |
 | 004 (step 1) | `visited` as one NumPy array reused and cleared with `.fill(False)` | 2.3 s | ~1.2× | ~6.1× |
 | 004 (step 2, current) | `grid` and `visited` as plain Python lists of lists | 0.74 s | ~3.1× vs step 1 | ~19× |
+| 005 | All N grids for each `p` generated in one NumPy call | 0.49 s | ~1.6× | ~29× |
 
 ---
 
@@ -186,3 +187,52 @@ Clearing the lists takes longer than NumPy's `.fill(False)` (~0.06 µs), and `.t
 
 **Ideas noted for later versions:**
 - **Done in 005:** generating all N grids for each `p` in one call. This was expected to change the random sequence, but it turned out not to (see 005).
+
+## 005: `005 percolation with new generation.py`
+
+**Change:** instead of generating each grid separately inside the inner loop, all N grids for a given `p` are generated in a single NumPy call at the start of that `p`'s loop.
+
+- **`make_grid(n,p)` was replaced by `make_grids(N,n,p)`**, which returns `np.random.random((N,n,n)) < p`, an `(N, n, n)` boolean NumPy array where `grids[k]` is the k-th grid.
+  - `np.random.random((N,n,n))` draws N·n·n floats uniformly from [0, 1).
+  - `< p` turns each float into `True` (open) with probability exactly `p`, and `False` (closed) otherwise. This matches the old meaning of `p` as the probability that a cell is **open**. The old `make_grid` comment said "closed", but the code always used open.
+  - Edge cases still behave: at `p = 0` no float is `< 0`, so every cell is closed. At `p = 1` every float in [0, 1) is `< 1`, so every cell is open.
+- **Main loop:** `grids = make_grids(N,n,p)` is called once per `p`. The inner loop is now `for gridArray in grids:`, which takes one `n×n` NumPy grid at a time.
+- **Converting to lists one grid at a time:** each grid is converted with `grid = gridArray.tolist()` just before it is filled, so the fill still runs on Python lists (the 004 step 2 speed-up is kept). Converting the whole `(N,n,n)` array with a single `.tolist()` was also tested:
+
+  | Conversion (one `p`, N = 5000) | Time |
+  |---|---|
+  | `.tolist()` on the whole batch, then loop | ~16 ms |
+  | Loop over the NumPy batch, `.tolist()` each grid (chosen) | ~10 ms |
+
+  Converting one grid at a time was faster, and it also means only one grid's worth of Python lists exists at a time, instead of about 17 MB of lists for all 5,000 grids.
+- The code has detailed comments explaining how `make_grids` works, the memory it uses and why each grid is converted separately.
+- The plot title is now "Generating all grids for each p at once".
+
+**Why it is faster:** every NumPy call has a fixed setup cost (calling from Python into NumPy, checking arguments and, for `np.random.choice` with `p=`, validating the probabilities and building a cumulative distribution). For a 20×20 grid this setup is much larger than the cost of generating the 400 random numbers. Previously it was paid N = 5000 times per `p`, and now it is paid once. `random() < p` is also a simpler operation than `choice` with probabilities.
+
+| Grid generation (one `p`, N = 5000) | Time |
+|---|---|
+| 5,000 × `np.random.choice` (001–004) | ~43 ms |
+| One `np.random.random((N,n,n)) < p` | ~3.8 ms |
+
+Over the 135 values of `p`, generation drops from about 5.8 s to about 0.5 s of a full N = 5000 run (plus the per-grid `.tolist()`).
+
+**Memory:** more is used, but only a small amount and only for one `p` at a time.
+- The temporary float array is N·n·n·8 bytes, about 16 MB. It is freed straight after the `< p` comparison.
+- The boolean batch is N·n·n bytes, about 2 MB. It is replaced when the next `p` starts.
+- Only one grid's worth of Python lists exists at a time.
+- Peak memory is therefore about 18 MB, compared with a few KB before. This doesn't matter at this size. For much larger `n` or `N` (for example 100×100 grids with N = 50,000, about 4 GB of floats), the grids should be generated in chunks, for example 1,000 at a time.
+
+**Surprise: the results are still exact, not just statistically equal.** Batching was expected to change how random numbers are used, so the curve would only match 004 statistically. In fact it matches exactly:
+- NumPy's legacy `np.random.choice(a, size, p=...)` works internally by drawing `size` uniform floats with the same generator as `np.random.random` and mapping each one through the cumulative probabilities `[p, 1]`. A float `u` becomes `True` exactly when `u < p`, which is the same test as `make_grids`.
+- Five thousand separate calls of size `(20,20)` use the same stream of floats, in the same order, as one call of size `(5000,20,20)`, because NumPy fills arrays in row-major (C) order: grid 0 row by row, then grid 1, and so on.
+- So with the same seed, every grid is identical to the grid the old code made.
+- This relies on how NumPy's legacy `np.random.choice` is implemented. In principle, rounding in NumPy's cumulative distribution could flip a cell whose float lands exactly on the boundary, but no such case happened in the check below.
+
+**Verification:**
+- All 675,000 grids of a full run (135 values of `p` × 5,000), generated the old way (`np.random.choice`, one at a time) and the new way (`np.random.random((N,n,n)) < p`) from `seed(0)`, were compared cell by cell: **0 cells differ**.
+- The full simulation at **N = 5000** gave an identical `chancePercolates` array to 004 at all 135 values of `p`. The full-run time went from 13.0 s (004) to 7.8 s (005).
+- At N = 300: identical `chancePercolates` again, 0.77 s (004, this run) → 0.49 s (~1.6× faster than 004, ~29× faster than 001).
+- A statistical comparison script (z-scores of the difference at each `p`) was prepared in case the results differed. It isn't needed while the grids stay identical, but will be used for any future change that does alter the random sequence.
+
+**Where the time goes now:** grid generation is now small. What remains is mostly the recursive fill in Python (the function calls themselves), the per-grid `.tolist()` and clearing `visited`.
