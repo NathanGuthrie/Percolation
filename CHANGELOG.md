@@ -318,6 +318,17 @@ The switch point was deliberately **not** tuned using knowledge of the curve (fo
 
 **A related earlier measurement** (while deciding whether to try this, N = 300, best of 3): running the closed-row test on every `p` gave 0.320 s, and running both tests on every `p` gave 0.321 s, against 0.316 s for 006. Run everywhere, the tests were slightly slower. The naive `p = 0.5` switch-over at least avoids running a test where it can never succeed, which is why 007 comes out just ahead of 006 instead of just behind.
 
+---
+
+## Housekeeping: comments trimmed in 005, 006 and 007
+
+The explanatory comments added in 005–007 had grown long enough that they made the code hard to read. They were cut back to the style of the original code (001): short comments at the end of a line, plus the odd `##` line above a block. The detailed reasoning (why each change is faster, memory use, why skipping filled cells is safe, why the batched grids are identical, why the pre-check fails) now lives only in this changelog.
+
+- **No code was changed.** All three files still produce identical curves (N = 300 checks: 005 = 006, and 004 = 007).
+- 001–004 were left as they were.
+
+---
+
 ## 008: `008 percolation with padded grid.py`
 
 **Built on 006**, the best clean version, not on 007: 007's pre-check was a failed experiment and is left out.
